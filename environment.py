@@ -1,22 +1,30 @@
 """
 Agent Marketplace Environment
 ------------------------------
-A custom Gymnasium environment demonstrating reward misspecification
-in an AI agent economy.
+A Gymnasium environment modelling how reputational infrastructure shapes
+agent behaviour in a competitive marketplace.
 
-Scenario: an AI agent competes for work in a marketplace. Clients select
-agents based on a *reputation score* — a proxy metric that is observable
-and gameable, but imperfectly correlated with the thing that actually
-matters: the quality of work delivered.
+Platform model (client-selects):
+  Clients browse agents ranked by reputation score and select the highest-
+  ranked available agent. Agents have no choice over which tasks they receive.
+  Their only strategic degree of freedom is *how* they approach each task.
 
-Two agents trained here with identical architectures but different reward
-functions show starkly different learned strategies. This is the core
-demonstration: the problem is not the agent's architecture or capability —
-it is what the reward signal is coupled to.
+The reputation score is a proxy metric — observable, gameable, and only
+imperfectly correlated with genuine value delivery. The reward_alpha parameter
+controls the infrastructure's signal fidelity: how closely the scoring system's
+rewards track actual value rather than gameable proxies.
 
-Connects directly to Pillar 2 of "The Epistemic Gate" (Hallam, 2026):
-reputation systems as information infrastructure, and the Goodhart's Law
-dynamics that emerge when agents optimise for a proxy signal they can game.
+    alpha = 1.0  →  infrastructure scores on unverified proxy metrics only
+    alpha = 0.0  →  infrastructure directly credits genuine value delivery
+    0 < alpha < 1 → intermediate: mixed proxy and quality signals
+
+Crucially, agents are rational — they respond to whatever the infrastructure
+rewards. Behavioural differences across alpha values are attributable to
+infrastructure design, not to differences in agent objectives or capability.
+
+Connects to Pillar 2 of "The Epistemic Gate" (Hallam, 2026): reputation
+systems as epistemic infrastructure, and how their design determines which
+agent strategies are selected for in competitive markets.
 """
 
 import gymnasium as gym
@@ -26,175 +34,142 @@ import numpy as np
 
 class AgentMarketplaceEnv(gym.Env):
     """
-    Simulated AI agent marketplace where a reputation score is the key
-    signal clients use to select between competing agents.
+    Simulated AI agent marketplace where reputation score is the signal
+    clients use to select agents.
+
+    Platform model: clients select the highest-reputation available agent.
+    Agents receive tasks without any choice over scope — their strategic
+    choice is the *approach* they apply: deep engagement, shallow templating,
+    score manipulation, or capability maintenance.
 
     --- Observation space (6 continuous variables, all in [0, 1]) ---
 
-        [0] reputation_score  The proxy metric. Clients see this; agents
-                              can influence it directly through gaming.
+        [0] reputation_score  The infrastructure's scoring output. Clients
+                              use this to select agents; it is gameable.
         [1] true_quality      Actual capability of the agent. Determines
-                              real task success rates. Not directly rewarded
-                              under the naive objective.
-        [2] task_difficulty   Difficulty of the currently available task.
+                              real task success rates. Only rewarded when
+                              alpha < 1 (infrastructure measures quality).
+        [2] task_difficulty   Difficulty of the currently assigned task.
         [3] task_value        Value/importance of the current task. Harder
                               tasks tend to be more valuable.
-        [4] market_health     Aggregate trust and quality in the marketplace.
-                              A shared resource — degraded by gaming behaviour.
+        [4] market_health     Aggregate quality and trust in the marketplace.
+                              A shared resource — degraded by gaming.
         [5] time_remaining    Fraction of episode still to run (1.0 → 0.0).
-                              (true_quality erodes each step via NATURAL_DECAY,
-                              modelling distribution shift and competitive drift
-                              rather than cognitive forgetting — see dynamics table.)
 
-    --- Action space (4 discrete actions) ---
+    --- Action space (4 discrete approach strategies) ---
 
-        0  CHERRY_PICK    Accept only the easy parts of a task. Near-certain
-                          success, small reputation boost, little real value.
-        1  TAKE_FULL      Accept the task at full scope. Success depends on
-                          true_quality; risky but genuinely valuable.
-        2  INVEST         Skip this task and invest in capability development.
-                          No immediate reward; raises true_quality for later.
-        3  GAME_METRIC    Exploit reputation system loopholes (e.g. fake
-                          reviews, selective disclosure). Reliable score
-                          boost, zero real value, erodes market trust.
+        0  SHALLOW_TEMPLATE   Apply a pattern-matched, surface-optimised
+                              response calibrated to what previously scored
+                              well. Near-certain client satisfaction on
+                              simple metrics; delivers only partial value
+                              since genuine complexity goes unaddressed.
+
+        1  DEEP_ENGAGEMENT    Engage genuinely with the full task. Success
+                              depends on true_quality; risky but delivers
+                              real value and builds capability.
+
+        2  CAPABILITY_MAINT   Skip deployment this period; principal invests
+                              in retraining / capability maintenance. No
+                              immediate output; raises true_quality for later.
+
+        3  SCORE_MANIPULATION Exploit scoring system loopholes (biased
+                              reviews, selective disclosure, inflated
+                              credentials). Reliable score boost, zero real
+                              value delivered, erodes market trust.
 
     --- Reward ---
 
-        reward = alpha * naive_reward + (1 - alpha) * aligned_reward
+        reward = alpha * proxy_reward + (1 - alpha) * quality_reward
 
-        naive_reward    = delta in reputation_score
-        aligned_reward  = value_delivered_to_client + market_health_effect
+        proxy_reward    = delta in reputation_score
+        quality_reward  = value_delivered_to_client + market_health_effect
 
-        alpha = 1.0  →  agent optimises purely for reputation  (problematic)
-        alpha = 0.0  →  agent optimises for real value and market health
-        0 < alpha < 1 → interpolation; the Streamlit slider explores this space
-
-    The naive and aligned components are always tracked in `info`, so the
-    app can display both regardless of which objective was optimised.
+        alpha = 1.0  →  infrastructure rewards only reputation changes
+        alpha = 0.0  →  infrastructure rewards real value and market health
     """
 
     metadata = {"render_modes": []}
 
-    # Labels and colours for Streamlit charts
     ACTION_NAMES = [
-        "Cherry-pick easy task",
-        "Take full task",
-        "Invest in quality",
-        "Game the metric",
+        "Shallow templating",
+        "Deep engagement",
+        "Capability maintenance",
+        "Score manipulation",
     ]
     ACTION_COLORS = ["#f0a500", "#2ecc71", "#3498db", "#e74c3c"]
 
     # ── Dynamics table ───────────────────────────────────────────────────────
     #
     # All values are per-step deltas; state variables are clipped to [0, 1].
-    # Adjust these constants to explore different market scenarios.
     #
-    # Key:
-    #   p_succ   = success probability (TAKE_FULL is state-dependent — see formula)
-    #   Δrep     = change in reputation_score
-    #   Δquality = change in true_quality (before natural decay)
-    #   Δmarket  = change in market_health
-    #   val_frac = fraction of task_value delivered to clients
-    #
-    #   Action          p_succ   Δrep (win)         Δrep (fail)        Δquality (win)  Δquality (fail)  Δmarket   val_frac
+    #   Action              p_succ   Δrep (win)         Δrep (fail)        Δquality (win)  Δquality (fail)  Δmarket   val_frac
     #   ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-    #   CHERRY_PICK     0.92     +0.020 + 0.010·d*  -0.010             +0.005           —               -0.010    0.25
-    #   TAKE_FULL       †        +0.030 + 0.030·d   -(0.030 + 0.010·d) +0.020          +0.008          +0.015   1.00
-    #   INVEST          —        -0.005              —                  +0.055           —               0.000    0.00
-    #   GAME_METRIC     1.00     +0.045              —                  -0.008           —               -0.040   0.00
+    #   SHALLOW_TEMPLATE    0.92     +0.020 + 0.010·d*  -0.010             +0.005           —               -0.010    0.25
+    #   DEEP_ENGAGEMENT     †        +0.030 + 0.030·d   -(0.030 + 0.010·d) +0.020          +0.008          +0.015   1.00
+    #   CAPABILITY_MAINT    —        -0.005              —                  +0.055           —               0.000    0.00
+    #   SCORE_MANIPULATION  1.00     +0.045              —                  -0.008           —               -0.040   0.00
     #   ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-    #   Natural decay   —         —                  —                  -0.003           —                —        —
+    #   Natural decay       —         —                  —                  -0.003           —                —        —
     #
-    #   * d = effective_difficulty (= task_difficulty × CHERRY_PICK_DIFFICULTY_FRACTION for CHERRY_PICK)
-    #   † TAKE_FULL: p_succ = clip(P_BASE + P_SCALE × quality × (1 − P_DIFF_MOD × difficulty), 0.05, 0.95)
-    #
-    # Note on natural decay: models distribution shift and competitive drift —
-    # a static agent's relative capability erodes as tasks and competitors evolve.
-    # Not cognitive forgetting. See: Gama et al. (2014) ACM Comp. Surveys 46(4);
-    # Sculley et al. (2015) "Hidden Technical Debt in ML Systems", NeurIPS.
+    #   * d = effective_difficulty (= task_difficulty × SHALLOW_DIFFICULTY_FRAC)
+    #   † DEEP_ENGAGEMENT: p_succ = clip(P_BASE + P_SCALE × quality × (1 − P_DIFF_MOD × difficulty), 0.05, 0.95)
 
-    # General
     NATURAL_DECAY = 0.003
 
-    # CHERRY_PICK — agent accepts only the easy fraction of the task
-    CHERRY_P_SUCCESS          = 0.92
-    CHERRY_DIFFICULTY_FRAC    = 0.25   # effective difficulty = task_difficulty × this
-    CHERRY_REP_BASE           = 0.020  # base reputation gain on success
-    CHERRY_REP_DIFF_SCALE     = 0.010  # extra rep per unit of effective difficulty
-    CHERRY_REP_FAIL           = -0.010
-    CHERRY_QUALITY_WIN        = 0.005
-    CHERRY_VAL_FRACTION       = 0.25   # fraction of task_value delivered
-    CHERRY_MARKET_DELTA       = -0.010 # hard tasks go unfulfilled
+    # SHALLOW_TEMPLATE — pattern-matched, surface-optimised response
+    SHALLOW_P_SUCCESS         = 0.92
+    SHALLOW_DIFFICULTY_FRAC   = 0.25
+    SHALLOW_REP_BASE          = 0.020
+    SHALLOW_REP_DIFF_SCALE    = 0.010
+    SHALLOW_REP_FAIL          = -0.010
+    SHALLOW_QUALITY_WIN       = 0.005
+    SHALLOW_VAL_FRACTION      = 0.25
+    SHALLOW_MARKET_DELTA      = -0.010
 
-    # TAKE_FULL — agent accepts the task at full scope
-    TAKE_FULL_P_BASE          = 0.25   # floor success probability
-    TAKE_FULL_P_SCALE         = 0.65   # scales with true_quality × (1 − P_DIFF_MOD × difficulty)
-    TAKE_FULL_P_DIFF_MOD      = 0.35   # how strongly difficulty suppresses success
-    TAKE_FULL_REP_BASE        = 0.030  # base reputation gain on success
-    TAKE_FULL_REP_DIFF_SCALE  = 0.030  # extra rep for harder tasks
-    TAKE_FULL_REP_FAIL_BASE   = 0.030  # base reputation loss on failure
-    TAKE_FULL_REP_FAIL_SCALE  = 0.010  # extra rep loss for harder tasks
-    TAKE_FULL_QUALITY_WIN     = 0.020
-    TAKE_FULL_QUALITY_FAIL    = 0.008  # learn from failure
-    TAKE_FULL_MARKET_WIN      = 0.015
-    TAKE_FULL_MARKET_FAIL     = -0.005
+    # DEEP_ENGAGEMENT — genuine full-task engagement
+    DEEP_P_BASE               = 0.25
+    DEEP_P_SCALE              = 0.65
+    DEEP_P_DIFF_MOD           = 0.35
+    DEEP_REP_BASE             = 0.030
+    DEEP_REP_DIFF_SCALE       = 0.030
+    DEEP_REP_FAIL_BASE        = 0.030
+    DEEP_REP_FAIL_SCALE       = 0.010
+    DEEP_QUALITY_WIN          = 0.020
+    DEEP_QUALITY_FAIL         = 0.008
+    DEEP_MARKET_WIN           = 0.015
+    DEEP_MARKET_FAIL          = -0.005
 
-    # INVEST — operator spends resources on retraining / capability maintenance
-    # instead of deploying the agent productively this step
-    INVEST_QUALITY_GAIN       = 0.055
-    INVEST_REP_DELTA          = -0.005 # slight reputation decay from inactivity
+    # CAPABILITY_MAINT — principal invests in retraining / maintenance
+    MAINT_QUALITY_GAIN        = 0.055
+    MAINT_REP_DELTA           = -0.005
 
-    # GAME_METRIC — exploit reputation system loopholes
-    GAME_REP_DELTA            = 0.045
-    GAME_QUALITY_DELTA        = -0.008 # maintenance neglected while gaming
-    GAME_MARKET_DELTA         = -0.040 # erodes trust in the marketplace
+    # SCORE_MANIPULATION — exploit scoring system loopholes
+    MANIP_REP_DELTA           = 0.045
+    MANIP_QUALITY_DELTA       = -0.008
+    MANIP_MARKET_DELTA        = -0.040
 
     def __init__(self, reward_alpha: float = 1.0, episode_length: int = 50):
-        """
-        Args:
-            reward_alpha:    Weight on the naive (reputation) reward component.
-                             1.0 = fully naive, 0.0 = fully aligned.
-            episode_length:  Number of timesteps per episode.
-        """
         super().__init__()
         if not 0.0 <= reward_alpha <= 1.0:
             raise ValueError("reward_alpha must be between 0 and 1")
 
-        self.reward_alpha = reward_alpha
+        self.reward_alpha   = reward_alpha
         self.episode_length = episode_length
 
-        # Gymnasium requires these two attributes to be set in __init__
         self.observation_space = spaces.Box(
             low=0.0, high=1.0, shape=(6,), dtype=np.float32
         )
         self.action_space = spaces.Discrete(4)
 
-    # ------------------------------------------------------------------ #
-    # Gymnasium API — the three methods every Gym env must implement       #
-    # ------------------------------------------------------------------ #
-
     def reset(self, seed=None, options=None):
-        """
-        Start a new episode from a neutral starting position.
-
-        All agents begin equal: reputation 0.5, true quality 0.5.
-        What diverges over the episode is purely a result of the
-        strategy the reward function incentivises.
-
-        Returns:
-            observation (np.ndarray): initial state vector
-            info (dict): empty at reset, populated during steps
-        """
-        # seeds self.np_random — always call super().reset(seed=seed) first
         super().reset(seed=seed)
 
-        self.step_count = 0
+        self.step_count       = 0
         self.reputation_score = 0.5
-        self.true_quality = 0.5
-        self.market_health = 1.0
+        self.true_quality     = 0.5
+        self.market_health    = 1.0
         self._generate_task()
 
-        # Per-episode history for visualisation — one entry per timestep
         self.history = {
             "reputation":      [self.reputation_score],
             "true_quality":    [self.true_quality],
@@ -207,77 +182,64 @@ class AgentMarketplaceEnv(gym.Env):
         return self._get_obs(), {}
 
     def step(self, action: int):
-        """
-        Execute one action and advance the environment by one timestep.
-
-        Returns:
-            obs (np.ndarray):   next observation
-            reward (float):     blended reward (alpha * naive + (1-alpha) * aligned)
-            terminated (bool):  True when episode_length is reached
-            truncated (bool):   always False (no time-limit truncation separate from termination)
-            info (dict):        both reward components + per-step diagnostics
-        """
         assert self.action_space.contains(action), f"Invalid action: {action}"
         self.step_count += 1
 
-        # Each action produces deltas; we apply them all at the end.
-        delta_reputation = 0.0
-        delta_true_quality = 0.0
+        delta_reputation    = 0.0
+        delta_true_quality  = 0.0
         delta_market_health = 0.0
-        value_delivered = 0.0
+        value_delivered     = 0.0
 
-        if action == 0:  # CHERRY_PICK
-            # Agent accepts only a stripped-down version of the task.
-            # High success rate → reliable score boost.
-            # But the hard core of the task goes undone → market gets less value.
-            success = self.np_random.random() < self.CHERRY_P_SUCCESS
+        if action == 0:  # SHALLOW_TEMPLATE
+            # Surface-optimised response: high apparent success rate, partial
+            # value delivery. Complex aspects of the task go unaddressed.
+            success = self.np_random.random() < self.SHALLOW_P_SUCCESS
             if success:
-                eff_diff = self.task_difficulty * self.CHERRY_DIFFICULTY_FRAC
-                delta_reputation   = self.CHERRY_REP_BASE + self.CHERRY_REP_DIFF_SCALE * eff_diff
-                value_delivered    = self.task_value * self.CHERRY_VAL_FRACTION
-                delta_true_quality = self.CHERRY_QUALITY_WIN
+                eff_diff           = self.task_difficulty * self.SHALLOW_DIFFICULTY_FRAC
+                delta_reputation   = self.SHALLOW_REP_BASE + self.SHALLOW_REP_DIFF_SCALE * eff_diff
+                value_delivered    = self.task_value * self.SHALLOW_VAL_FRACTION
+                delta_true_quality = self.SHALLOW_QUALITY_WIN
             else:
-                delta_reputation = self.CHERRY_REP_FAIL
-            delta_market_health = self.CHERRY_MARKET_DELTA
+                delta_reputation = self.SHALLOW_REP_FAIL
+            delta_market_health = self.SHALLOW_MARKET_DELTA
 
-        elif action == 1:  # TAKE_FULL
-            # Success probability scales with true_quality and falls with difficulty.
-            # A capable agent succeeds more often on hard tasks — the aligned
-            # strategy creates a virtuous cycle: quality → success → more quality.
+        elif action == 1:  # DEEP_ENGAGEMENT
+            # Genuine full-task engagement. Success scales with true_quality
+            # and falls with difficulty — a capable agent succeeds on hard
+            # tasks, creating a virtuous cycle when the infrastructure
+            # rewards genuine value.
             success_prob = float(np.clip(
-                self.TAKE_FULL_P_BASE
-                + self.TAKE_FULL_P_SCALE * self.true_quality * (1 - self.TAKE_FULL_P_DIFF_MOD * self.task_difficulty),
+                self.DEEP_P_BASE
+                + self.DEEP_P_SCALE * self.true_quality
+                  * (1 - self.DEEP_P_DIFF_MOD * self.task_difficulty),
                 0.05, 0.95,
             ))
             success = self.np_random.random() < success_prob
             if success:
-                delta_reputation   = self.TAKE_FULL_REP_BASE + self.TAKE_FULL_REP_DIFF_SCALE * self.task_difficulty
-                value_delivered    = self.task_value
-                delta_true_quality = self.TAKE_FULL_QUALITY_WIN
-                delta_market_health = self.TAKE_FULL_MARKET_WIN
+                delta_reputation    = self.DEEP_REP_BASE + self.DEEP_REP_DIFF_SCALE * self.task_difficulty
+                value_delivered     = self.task_value
+                delta_true_quality  = self.DEEP_QUALITY_WIN
+                delta_market_health = self.DEEP_MARKET_WIN
             else:
-                delta_reputation   = -(self.TAKE_FULL_REP_FAIL_BASE + self.TAKE_FULL_REP_FAIL_SCALE * self.task_difficulty)
-                delta_true_quality = self.TAKE_FULL_QUALITY_FAIL
-                delta_market_health = self.TAKE_FULL_MARKET_FAIL
+                delta_reputation    = -(self.DEEP_REP_FAIL_BASE + self.DEEP_REP_FAIL_SCALE * self.task_difficulty)
+                delta_true_quality  = self.DEEP_QUALITY_FAIL
+                delta_market_health = self.DEEP_MARKET_FAIL
 
-        elif action == 2:  # INVEST
-            # No task taken this step — operator spends resources on retraining /
-            # capability maintenance rather than deploying the agent productively.
-            # True quality grows substantially; reputation decays slightly from inactivity.
-            delta_true_quality = self.INVEST_QUALITY_GAIN
-            delta_reputation   = self.INVEST_REP_DELTA
+        elif action == 2:  # CAPABILITY_MAINT
+            # Principal invests in retraining / capability maintenance rather
+            # than deploying the agent this period. Quality grows; reputation
+            # decays slightly from inactivity.
+            delta_true_quality = self.MAINT_QUALITY_GAIN
+            delta_reputation   = self.MAINT_REP_DELTA
 
-        elif action == 3:  # GAME_METRIC
-            # Exploit reputation system loopholes (biased reviews, selective
-            # disclosure, inflated credentials). Strong, reliable score boost —
-            # but no work is done, maintenance is neglected, and marketplace
-            # trust erodes for all participants.
-            delta_reputation    = self.GAME_REP_DELTA
-            delta_true_quality  = self.GAME_QUALITY_DELTA
-            delta_market_health = self.GAME_MARKET_DELTA
+        elif action == 3:  # SCORE_MANIPULATION
+            # Exploit scoring loopholes: biased reviews, selective disclosure,
+            # inflated credentials. Reliable score boost; no work done;
+            # market trust erodes for all participants.
+            delta_reputation    = self.MANIP_REP_DELTA
+            delta_true_quality  = self.MANIP_QUALITY_DELTA
+            delta_market_health = self.MANIP_MARKET_DELTA
 
-        # Apply all deltas. Natural decay always reduces true_quality —
-        # modelling distribution shift and competitive drift (see class docstring).
         self.reputation_score = float(np.clip(
             self.reputation_score + delta_reputation, 0.0, 1.0
         ))
@@ -288,20 +250,15 @@ class AgentMarketplaceEnv(gym.Env):
             self.market_health + delta_market_health, 0.0, 1.0
         ))
 
-        # Compute both reward components regardless of which is used for training.
-        # The app displays both so the visitor can see what each agent is actually
-        # doing even when it isn't optimising for that signal.
-        naive_reward = delta_reputation
-        aligned_reward = value_delivered + 0.3 * delta_market_health
+        proxy_reward   = delta_reputation
+        quality_reward = value_delivered + 0.3 * delta_market_health
         reward = (
-            self.reward_alpha * naive_reward
-            + (1.0 - self.reward_alpha) * aligned_reward
+            self.reward_alpha * proxy_reward
+            + (1.0 - self.reward_alpha) * quality_reward
         )
 
-        # New task for next step
         self._generate_task()
 
-        # Record for visualisation
         self.history["reputation"].append(self.reputation_score)
         self.history["true_quality"].append(self.true_quality)
         self.history["market_health"].append(self.market_health)
@@ -310,20 +267,16 @@ class AgentMarketplaceEnv(gym.Env):
         self.history["rewards"].append(float(reward))
 
         terminated = self.step_count >= self.episode_length
-        truncated = False
+        truncated  = False
         info = {
-            "value_delivered":    float(value_delivered),
-            "delta_reputation":   float(delta_reputation),
+            "value_delivered":     float(value_delivered),
+            "delta_reputation":    float(delta_reputation),
             "delta_market_health": float(delta_market_health),
-            "naive_reward":       float(naive_reward),
-            "aligned_reward":     float(aligned_reward),
+            "proxy_reward":        float(proxy_reward),
+            "quality_reward":      float(quality_reward),
         }
 
         return self._get_obs(), float(reward), terminated, truncated, info
-
-    # ------------------------------------------------------------------ #
-    # Internal helpers                                                     #
-    # ------------------------------------------------------------------ #
 
     def _get_obs(self) -> np.ndarray:
         return np.array(
@@ -339,7 +292,6 @@ class AgentMarketplaceEnv(gym.Env):
         )
 
     def _generate_task(self):
-        """Sample the next task. Harder tasks are proportionally more valuable."""
         self.task_difficulty = float(self.np_random.uniform(0.2, 1.0))
         raw_value = self.task_difficulty * float(self.np_random.uniform(0.7, 1.3))
         self.task_value = float(np.clip(raw_value, 0.0, 1.0))

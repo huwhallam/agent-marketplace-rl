@@ -1,11 +1,11 @@
 """
-Streamlit demo — Agent Marketplace: Reward Misspecification
-------------------------------------------------------------
+Portfolio Streamlit demo — AI Agent Marketplace: Infrastructure Design
+----------------------------------------------------------------------
 Loads pre-trained results from:
-  results.pkl       (produced by train.py)
-  results_multi.pkl (produced by multi_agent.py)
+  results.pkl       (produced by train.py — 5-alpha infrastructure sweep)
+  results_multi.pkl (produced by multi_agent.py — competitive + population)
 
-To generate:
+To regenerate:
     python train.py --episodes 500
     python multi_agent.py --episodes 300
 
@@ -22,16 +22,18 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from multi_agent import simulate_market_evolution
+from multi_agent import governance_efficiency_data, simulate_market_evolution
 from train import smooth
 
-# ─── Page config ──────────────────────────────────────────────────────────────── #
+
+# ─── Page config ─────────────────────────────────────────────────────────────── #
 
 st.set_page_config(
-    page_title="Agent Marketplace · Reward Misspecification",
+    page_title="AI Agent Marketplace — Infrastructure Design",
     page_icon="📊",
     layout="wide",
 )
+
 
 # ─── Data loading ─────────────────────────────────────────────────────────────── #
 
@@ -47,15 +49,20 @@ def load_pkl(path: str):
 results       = load_pkl("results.pkl")
 results_multi = load_pkl("results_multi.pkl")
 
-# ─── Colour palette ───────────────────────────────────────────────────────────── #
 
-C_NAIVE   = "#e74c3c"   # red    — naive / gaming
-C_ALIGNED = "#2ecc71"   # green  — aligned / healthy
-C_MARKET  = "#3498db"   # blue   — market health
-C_QUALITY = "#9b59b6"   # purple — true quality / effective rep
+# ─── Colour palette ──────────────────────────────────────────────────────────── #
+
+C_GAMING  = "#e74c3c"   # red    — score manipulation / gaming
+C_ALIGNED = "#2ecc71"   # green  — deep engagement / value delivery
+C_MARKET  = "#3498db"   # blue   — market health / capability maintenance
+C_SHALLOW = "#f0a500"   # amber  — shallow templating
+C_QUALITY = "#9b59b6"   # purple — true quality
 C_NEUTRAL = "#95a5a6"   # grey   — annotations
 
-# ─── Module-level cached computations ─────────────────────────────────────────── #
+FPR_COLORS = ["#2ecc71", "#f0a500", "#e74c3c"]   # perfect → imprecise
+
+
+# ─── Cached simulations ──────────────────────────────────────────────────────── #
 
 @st.cache_data
 def run_pop_sim(
@@ -63,13 +70,30 @@ def run_pop_sim(
     rep_naive: float,
     audit_prob: float,
     audit_penalty: float,
+    false_positive_rate: float,
     selection_intensity: float,
 ) -> dict:
     return simulate_market_evolution(
         reputation_by_alpha={0.0: rep_aligned, 1.0: rep_naive},
         audit_prob=audit_prob,
         audit_penalty=audit_penalty,
+        false_positive_rate=false_positive_rate,
         selection_intensity=selection_intensity,
+        seed=0,
+    )
+
+
+@st.cache_data
+def run_efficiency_frontier(
+    rep_aligned: float,
+    rep_naive: float,
+    selection_intensity: float,
+    audit_penalty: float,
+) -> dict:
+    return governance_efficiency_data(
+        reputation_by_alpha={0.0: rep_aligned, 1.0: rep_naive},
+        selection_intensity=selection_intensity,
+        audit_penalty=audit_penalty,
         seed=0,
     )
 
@@ -79,13 +103,10 @@ def governance_heatmap_data(
     rep_aligned: float,
     rep_naive: float,
     selection_intensity: float,
+    false_positive_rate: float,
     n_pts: int = 14,
 ) -> tuple:
-    """
-    Compute final gaming_fraction over a grid of (audit_prob × audit_penalty).
-    The result is cached per selection_intensity, so slider drags only recompute
-    when selection_intensity changes — not on every audit_prob / audit_penalty move.
-    """
+    """Gaming fraction over a grid of (audit_prob × audit_severity)."""
     probs     = np.linspace(0.0, 0.50, n_pts)
     penalties = np.linspace(0.0, 1.0,  n_pts)
     z = np.zeros((n_pts, n_pts))
@@ -95,6 +116,7 @@ def governance_heatmap_data(
                 reputation_by_alpha={0.0: rep_aligned, 1.0: rep_naive},
                 audit_prob=float(prob),
                 audit_penalty=float(pen),
+                false_positive_rate=false_positive_rate,
                 selection_intensity=selection_intensity,
                 seed=0,
             )
@@ -102,169 +124,183 @@ def governance_heatmap_data(
     return probs, penalties, z
 
 
-# ─── Header ───────────────────────────────────────────────────────────────────── #
+# ─── Header ──────────────────────────────────────────────────────────────────── #
 
-st.title("Agent Marketplace: Reward Misspecification")
+st.title("AI Agent Marketplace: Infrastructure Design")
 st.markdown(
     """
-    Two AI agents compete for tasks in a simulated marketplace. Clients select agents using a
-    **reputation score** — a proxy metric that is observable, gameable, and only imperfectly
-    correlated with what actually matters: the quality of work delivered.
+    Gaming and value-misalignment in AI agent marketplaces is not a **reward specification**
+    problem — it is an **infrastructure design** problem. Agents are rational: they respond
+    to whatever the scoring system rewards. When infrastructure scores only on gameable proxy
+    metrics, rational agents game those metrics. The fix is at the infrastructure level.
 
-    Both agents share an identical [DQN](https://arxiv.org/abs/1312.5602) architecture.
-    The only difference is their reward signal.
-    This is a direct demonstration of **Goodhart's Law** in an AI agent economy:
-    *when a measure becomes the target, it ceases to be a good measure.*
+    Each simulation uses an identical [DQN](https://arxiv.org/abs/1312.5602) agent architecture
+    trained under different infrastructure configurations. **The only variable is what the
+    reputation system rewards.** Connects to Pillar 2 of *The Epistemic Gate* (Hallam, 2026).
     """
 )
 
 tab1, tab2, tab3 = st.tabs([
-    "1 · The Core Problem",
-    "2 · Competitive Pressure",
-    "3 · Market Evolution",
+    "1 · Infrastructure Design",
+    "2 · Selection Pressure",
+    "3 · Governance Efficiency",
 ])
 
 
-# ══════════════════════════════════════════════════════════════════════════════════ #
-# TAB 1 — Core comparison                                                           #
-# ══════════════════════════════════════════════════════════════════════════════════ #
+# ══════════════════════════════════════════════════════════════════════════════ #
+# TAB 1 — Infrastructure Design                                                  #
+# ══════════════════════════════════════════════════════════════════════════════ #
 
 with tab1:
-    if results is None:
+    if results is None or 0.0 not in results:
         st.warning(
-            "No results found. Run `python train.py --episodes 500` to generate `results.pkl`."
+            "Results not found. Run `python train.py --episodes 500` to generate `results.pkl`."
         )
     else:
-        naive   = results["naive"]["final_eval"]
-        aligned = results["aligned"]["final_eval"]
-        cfg     = results["config"]
-        steps   = list(range(cfg["episode_length"] + 1))
+        cfg           = results["config"]
+        alphas        = cfg["alphas"]
+        alpha_labels  = cfg["alpha_labels"]
+        action_names  = cfg["action_names"]
+        action_colors = cfg["action_colors"]
+
+        # Ordered from least to most governance: 1.0 → 0.0
+        ordered_alphas = sorted(alphas, reverse=True)
+        level_labels   = [alpha_labels[a][0] for a in ordered_alphas]
 
         st.markdown(
             """
-            ### Goodhart's Law in action
+            ### Infrastructure signal fidelity shapes rational behaviour
 
-            The **naive agent** (α = 1.0) is rewarded for increases in reputation score.
-            The **aligned agent** (α = 0.0) is rewarded for value delivered to clients and
-            marketplace health. Both agents train on identical task sequences (same seed),
-            so any behavioural difference is attributable purely to the reward function.
+            The **infrastructure signal fidelity** (α) controls what the scoring system
+            actually measures. At α = 1.0 the platform scores unverified proxy metrics
+            only — client ratings, completion rates — which are cheap to game. At α = 0.0
+            the platform independently verifies genuine value delivery.
+
+            All agents share the same DQN architecture and face identical task sequences.
+            Behavioural differences are attributable entirely to infrastructure design.
             """
         )
 
-        # ── Summary metrics ──────────────────────────────────────────────────────── #
-        st.markdown("#### Final evaluation — 50 greedy episodes")
-        mc = st.columns(4)
-        for col, (label, key) in zip(mc, [
-            ("Reputation score",  "mean_final_reputation"),
-            ("True quality",      "mean_final_true_quality"),
-            ("Market health",     "mean_final_market_health"),
-            ("Value delivered",   "mean_value_delivered"),
-        ]):
-            n_val = naive[key]
-            a_val = aligned[key]
-            col.metric(
-                label=label,
-                value=f"{a_val:.3f}  (aligned)",
-                delta=f"{a_val - n_val:+.3f} vs naive",
-            )
+        # ── Strategy sweep: stacked bar ───────────────────────────────────────────── #
+        st.markdown("#### Strategy adopted under each governance design")
+        fig_sweep = go.Figure()
+        for j, (aname, acolor) in enumerate(zip(action_names, action_colors)):
+            fig_sweep.add_trace(go.Bar(
+                name=aname,
+                x=level_labels,
+                y=[results[a]["final_eval"]["action_dist"][j] for a in ordered_alphas],
+                marker_color=acolor,
+                opacity=0.88,
+            ))
+        fig_sweep.update_layout(
+            barmode="stack",
+            xaxis_title="Governance design  (left = no governance  →  right = full quality verification)",
+            yaxis=dict(tickformat=".0%", range=[0, 1.02], title="Action distribution"),
+            legend=dict(orientation="h", y=1.10),
+            height=340,
+            margin=dict(l=40, r=20, t=60, b=50),
+        )
+        st.plotly_chart(fig_sweep, width="stretch")
 
-        # ── Trajectories ─────────────────────────────────────────────────────────── #
-        st.markdown("#### State trajectories (mean over 50 evaluation episodes)")
-        tc1, tc2, tc3 = st.columns(3)
-        for col, (title, key, aligned_color) in zip(
-            [tc1, tc2, tc3],
-            [
-                ("Reputation score",  "mean_trajectory_reputation",    C_ALIGNED),
-                ("True quality",      "mean_trajectory_true_quality",  C_QUALITY),
-                ("Market health",     "mean_trajectory_market_health", C_MARKET),
-            ],
-        ):
-            fig = go.Figure()
-            for label, color, rkey in [
-                ("Naive (α=1.0)",   C_NAIVE,       "naive"),
-                ("Aligned (α=0.0)", aligned_color, "aligned"),
-            ]:
-                fig.add_trace(go.Scatter(
-                    x=steps,
-                    y=results[rkey]["final_eval"][key],
-                    name=label,
-                    line=dict(color=color, width=2),
-                ))
-            fig.update_layout(
+        # ── Outcome sweep ─────────────────────────────────────────────────────────── #
+        st.markdown("#### Market outcomes by governance design")
+        fig_out = make_subplots(
+            rows=1, cols=3,
+            subplot_titles=("True quality", "Market health", "Value delivered"),
+        )
+        for col_idx, (metric_key, color) in enumerate([
+            ("mean_final_true_quality",   C_QUALITY),
+            ("mean_final_market_health",  C_MARKET),
+            ("mean_value_delivered",      C_ALIGNED),
+        ], start=1):
+            fig_out.add_trace(go.Scatter(
+                x=level_labels,
+                y=[results[a]["final_eval"][metric_key] for a in ordered_alphas],
+                mode="lines+markers",
+                line=dict(color=color, width=2.5),
+                marker=dict(size=9),
+                showlegend=False,
+            ), row=1, col=col_idx)
+        fig_out.update_yaxes(range=[0, 1.05])
+        fig_out.update_layout(
+            height=280,
+            margin=dict(l=40, r=20, t=50, b=40),
+        )
+        st.plotly_chart(fig_out, width="stretch")
+
+        st.info(
+            "**Infrastructure finding:** Under no governance (α = 1.0), rational agents "
+            "converge to 100 % score manipulation — the strategy the infrastructure rewards. "
+            "True quality, market health, and value delivered all collapse to zero. Under "
+            "full quality verification (α = 0.0), the same agents engage exclusively in "
+            "deep work. The difference is entirely attributable to infrastructure design, "
+            "not agent objectives or architecture."
+        )
+
+        # ── Drill-down: explore a specific governance level ────────────────────────── #
+        st.divider()
+        st.markdown("#### Drill down: trajectories for a specific governance level")
+        selected_label = st.select_slider(
+            "Governance level",
+            options=level_labels,
+            value=level_labels[0],   # default: No governance
+        )
+        selected_alpha = ordered_alphas[level_labels.index(selected_label)]
+        short_label, description = alpha_labels[selected_alpha]
+
+        st.info(f"**{short_label} (α = {selected_alpha:.2f})** — {description}")
+
+        fe    = results[selected_alpha]["final_eval"]
+        steps = list(range(cfg["episode_length"] + 1))
+
+        traj_cols = st.columns(3)
+        for col, (title, key, color) in zip(traj_cols, [
+            ("Reputation score",  "mean_trajectory_reputation",    C_NEUTRAL),
+            ("True quality",      "mean_trajectory_true_quality",  C_QUALITY),
+            ("Market health",     "mean_trajectory_market_health", C_MARKET),
+        ]):
+            fig_t = go.Figure(go.Scatter(
+                x=steps,
+                y=fe[key],
+                line=dict(color=color, width=2.5),
+            ))
+            fig_t.update_layout(
                 title=title,
                 xaxis_title="Step",
                 yaxis=dict(range=[0, 1.05]),
-                legend=dict(orientation="h", y=-0.30),
-                height=290,
-                margin=dict(l=40, r=20, t=40, b=70),
+                height=260,
+                margin=dict(l=40, r=20, t=40, b=40),
+                showlegend=False,
             )
-            col.plotly_chart(fig, width="stretch")
+            col.plotly_chart(fig_t, width="stretch")
 
-        # ── Action distribution ───────────────────────────────────────────────────── #
-        st.markdown("#### Learned action distributions")
-        fig_act = go.Figure()
-        for label, color, rkey in [
-            ("Naive (α=1.0)",   C_NAIVE,   "naive"),
-            ("Aligned (α=0.0)", C_ALIGNED, "aligned"),
-        ]:
-            fig_act.add_trace(go.Bar(
-                name=label,
-                x=cfg["action_names"],
-                y=results[rkey]["final_eval"]["action_dist"],
-                marker_color=color,
-                opacity=0.85,
+        with st.expander("Training curve"):
+            data = results[selected_alpha]["train"]
+            eps  = list(range(1, len(data["rewards"]) + 1))
+            clr  = C_GAMING if selected_alpha >= 0.75 else C_ALIGNED
+            fig_tr = go.Figure(go.Scatter(
+                x=eps,
+                y=smooth(data["rewards"]),
+                line=dict(color=clr, width=2),
             ))
-        fig_act.update_layout(
-            barmode="group",
-            yaxis=dict(tickformat=".0%", range=[0, 1.1], title="Fraction of actions"),
-            height=320,
-            margin=dict(l=40, r=20, t=10, b=40),
-        )
-        st.plotly_chart(fig_act, width="stretch")
-
-        st.info(
-            "**Key finding:** The naive agent learns to spend ~100 % of its time gaming "
-            "the metric — achieving the highest possible reputation while delivering zero "
-            "real value. A client selecting by reputation alone would consistently choose "
-            "the worse agent. This is the governance failure the aligned reward prevents."
-        )
-
-        # ── Training curves ───────────────────────────────────────────────────────── #
-        with st.expander("Training curves"):
-            ec1, ec2 = st.columns(2)
-            for col, (label, color, rkey) in zip(
-                [ec1, ec2],
-                [
-                    ("Naive (α=1.0)",   C_NAIVE,   "naive"),
-                    ("Aligned (α=0.0)", C_ALIGNED, "aligned"),
-                ],
-            ):
-                data = results[rkey]["train"]
-                eps  = list(range(1, len(data["rewards"]) + 1))
-                fig_tr = go.Figure(go.Scatter(
-                    x=eps,
-                    y=smooth(data["rewards"]),
-                    line=dict(color=color, width=2),
-                ))
-                fig_tr.update_layout(
-                    title=f"{label} — training reward (smoothed)",
-                    xaxis_title="Episode",
-                    yaxis_title="Total reward",
-                    height=250,
-                    margin=dict(l=40, r=20, t=40, b=40),
-                    showlegend=False,
-                )
-                col.plotly_chart(fig_tr, width="stretch")
+            fig_tr.update_layout(
+                xaxis_title="Episode",
+                yaxis_title="Training reward (smoothed)",
+                height=250,
+                margin=dict(l=40, r=20, t=20, b=40),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_tr, width="stretch")
 
 
-# ══════════════════════════════════════════════════════════════════════════════════ #
-# TAB 2 — Competitive pressure                                                      #
-# ══════════════════════════════════════════════════════════════════════════════════ #
+# ══════════════════════════════════════════════════════════════════════════════ #
+# TAB 2 — Selection Pressure                                                     #
+# ══════════════════════════════════════════════════════════════════════════════ #
 
 with tab2:
     if results_multi is None:
         st.warning(
-            "No multi-agent results found. "
+            "Multi-agent results not found. "
             "Run `python multi_agent.py --episodes 300` to generate `results_multi.pkl`."
         )
     else:
@@ -272,25 +308,29 @@ with tab2:
         cfg_m       = results_multi["config"]
         intensities = cfg_m["intensities"]
         int_labels  = [f"Intensity {i:.1f}" for i in intensities]
-        int_colors  = ["#3498db", "#9b59b6", "#e74c3c"]
+        int_colors  = [C_MARKET, C_QUALITY, C_GAMING]
 
         st.markdown(
             """
-            ### Does competition pressure aligned agents into gaming?
+            ### Selection pressure is the mechanism, not the cause
 
-            The aligned agent now shares the market with a single competitor that **always**
-            games the metric — the simplest possible adversarial pressure. As the competitor's
-            reputation climbs, the aligned agent's market share falls.
+            These agents all operate under **aligned infrastructure** (α = 0.0): the scoring
+            system credits genuine value delivery. Each competes against a single opponent
+            that always score-manipulates — the simplest possible competitive pressure. As
+            the competitor's reputation climbs, the aligned agent's market share falls.
 
-            **Competition intensity** controls how strongly rewards scale with relative market
-            share. At intensity = 0 the agent receives the full aligned reward regardless of
-            the competitor. At intensity = 1 its reward is proportional to its fraction of
-            the market.
+            **Competition intensity** controls how strongly market share loss cuts into the
+            agent's reward. The question: does selection pressure push aligned agents toward
+            gaming?
+
+            This tab illustrates how infrastructure design propagates to population-level
+            outcomes: selection pressure amplifies the strategies that infrastructure has
+            already shaped. It does not create new ones.
             """
         )
 
-        # ── Action distributions ──────────────────────────────────────────────────── #
-        st.markdown("#### Action distributions under competitive pressure")
+        # ── Action distributions ───────────────────────────────────────────────────── #
+        st.markdown("#### Action distribution under competitive pressure")
         fig_ca = go.Figure()
         for intensity, color, ilabel in zip(intensities, int_colors, int_labels):
             fig_ca.add_trace(go.Bar(
@@ -303,19 +343,20 @@ with tab2:
         fig_ca.update_layout(
             barmode="group",
             yaxis=dict(tickformat=".0%", range=[0, 1.1], title="Fraction of actions"),
+            legend=dict(orientation="h", y=1.10),
             height=330,
-            margin=dict(l=40, r=20, t=10, b=40),
+            margin=dict(l=40, r=20, t=60, b=40),
         )
         st.plotly_chart(fig_ca, width="stretch")
 
         # ── Metrics table ─────────────────────────────────────────────────────────── #
-        st.markdown("#### Key metrics by competition intensity")
+        st.markdown("#### Key outcomes by competition intensity")
         rows = [
-            ("Reputation",      "mean_final_reputation"),
-            ("True quality",    "mean_final_true_quality"),
-            ("Market health",   "mean_final_market_health"),
-            ("Value delivered", "mean_value_delivered"),
-            ("Market share",    "mean_final_market_share"),
+            ("Reputation score",  "mean_final_reputation"),
+            ("True quality",      "mean_final_true_quality"),
+            ("Market health",     "mean_final_market_health"),
+            ("Value delivered",   "mean_value_delivered"),
+            ("Market share",      "mean_final_market_share"),
         ]
         df_comp = pd.DataFrame(
             {
@@ -327,82 +368,106 @@ with tab2:
         st.dataframe(df_comp.style.format("{:.3f}"), width="stretch")
 
         st.info(
-            "**Key finding:** Even under direct competitive pressure from a gaming agent, "
-            "the aligned agent maintains its value-delivery strategy. The cost is a reduced "
-            "market share — but the strategy does not drift toward gaming. This confirms "
-            "that reward misspecification, not competitive pressure alone, drives gaming "
-            "behaviour."
+            "**Selection pressure finding:** Even under direct competition from a gaming "
+            "agent at full market intensity, agents trained under aligned infrastructure "
+            "maintain genuine value delivery. Market share falls — that is the cost of "
+            "alignment under misaligned market conditions — but strategy does not drift "
+            "toward gaming. Selection pressure amplifies existing strategies; "
+            "infrastructure design determines what those strategies are."
         )
 
         # ── Trajectory comparison ─────────────────────────────────────────────────── #
-        with st.expander("Reputation trajectories by intensity"):
+        with st.expander("Reputation and quality trajectories by intensity"):
             traj_cols = st.columns(len(intensities))
             for intensity, col, color in zip(intensities, traj_cols, int_colors):
                 fe  = comp[intensity]["final_eval"]
                 s   = list(range(len(fe["mean_trajectory_reputation"])))
-                fig_t = go.Figure(go.Scatter(
-                    x=s,
-                    y=fe["mean_trajectory_reputation"],
-                    line=dict(color=color, width=2),
-                ))
+                fig_t = make_subplots(
+                    rows=2, cols=1, shared_xaxes=True,
+                    subplot_titles=("Reputation", "True quality"),
+                    vertical_spacing=0.15,
+                )
+                fig_t.add_trace(go.Scatter(
+                    x=s, y=fe["mean_trajectory_reputation"],
+                    line=dict(color=color, width=2), showlegend=False,
+                ), row=1, col=1)
+                fig_t.add_trace(go.Scatter(
+                    x=s, y=fe["mean_trajectory_true_quality"],
+                    line=dict(color=C_QUALITY, width=2), showlegend=False,
+                ), row=2, col=1)
+                fig_t.update_yaxes(range=[0, 1.05])
+                fig_t.update_xaxes(title_text="Step", row=2, col=1)
                 fig_t.update_layout(
                     title=f"Intensity {intensity:.1f}",
-                    xaxis_title="Step",
-                    yaxis=dict(range=[0, 1.05]),
-                    height=250,
-                    margin=dict(l=40, r=20, t=40, b=40),
-                    showlegend=False,
+                    height=340,
+                    margin=dict(l=40, r=20, t=50, b=40),
                 )
                 col.plotly_chart(fig_t, width="stretch")
 
 
-# ══════════════════════════════════════════════════════════════════════════════════ #
-# TAB 3 — Market evolution (live)                                                   #
-# ══════════════════════════════════════════════════════════════════════════════════ #
+# ══════════════════════════════════════════════════════════════════════════════ #
+# TAB 3 — Governance Efficiency                                                  #
+# ══════════════════════════════════════════════════════════════════════════════ #
 
 with tab3:
     st.markdown(
         """
-        ### Can governance flip the equilibrium?
+        ### Can governance flip the equilibrium? Precision matters more than intensity.
 
-        A population of 60 agents, each with a gaming tendency α ∈ [0, 1], evolves under
-        replicator dynamics over 150 generations. Fitness is determined by **effective
-        reputation** in a market whose health degrades as more agents game — a tragedy of
-        the commons. Three levers let you explore when governance can steer the market away
-        from the gaming equilibrium.
+        A population of 60 agents evolves under replicator dynamics over 150 generations.
+        Governance (periodic audits) penalises gaming agents — but audits carry a
+        **false positive rate**: with some probability, an aligned agent is incorrectly
+        penalised. This models a key governance trade-off: higher audit intensity catches
+        more gaming, but imprecise audits impose collateral cost on legitimate agents.
+
+        The **governance efficiency frontier** shows equilibrium market health as a function
+        of audit intensity, for three levels of audit precision. The central finding:
+        beyond a threshold, imprecise auditing fails to improve — or worsens — outcomes.
+        Infrastructure operators should target *precision* over *intensity*.
         """
     )
 
     # ── Sliders ───────────────────────────────────────────────────────────────────── #
-    sc1, sc2, sc3 = st.columns(3)
+    sc1, sc2, sc3, sc4 = st.columns(4)
     audit_prob = sc1.slider(
         "Audit probability",
         min_value=0.00, max_value=0.50, value=0.00, step=0.01,
-        help="Per-generation probability that gaming agents are audited and penalised.",
+        help="Per-generation probability of an audit event.",
     )
     audit_penalty = sc2.slider(
         "Audit severity",
         min_value=0.00, max_value=1.00, value=0.30, step=0.05,
-        help="Reputation discount applied to gaming agents when an audit occurs.",
+        help="Reputation discount applied to gaming agents when caught.",
     )
-    selection_intensity = sc3.slider(
-        "Market reliance on reputation",
-        min_value=1.0, max_value=5.0, value=3.0, step=0.1,
+    false_positive_rate = sc3.slider(
+        "Audit false positive rate",
+        min_value=0.00, max_value=0.50, value=0.00, step=0.01,
         help=(
-            "How strongly the market selects agents by reputation score. "
-            "Higher = reputation differences matter more = stronger gaming incentive."
+            "Probability that an aligned agent is incorrectly penalised. "
+            "0 = perfect precision.  0.5 = random (no governance signal)."
         ),
     )
+    selection_intensity = sc4.slider(
+        "Market selection intensity",
+        min_value=1.0, max_value=5.0, value=3.0, step=0.1,
+        help="How strongly the market favours higher-reputation agents.",
+    )
 
-    # Reputation benchmarks from single-agent results (or sensible defaults)
-    if results is not None:
-        rep_aligned = results["aligned"]["final_eval"]["mean_final_reputation"]
-        rep_naive   = results["naive"]["final_eval"]["mean_final_reputation"]
+    # Reputation benchmarks
+    if results_multi is not None and "reputation_by_alpha" in results_multi.get("config", {}):
+        rep_aligned = results_multi["config"]["reputation_by_alpha"][0.0]
+        rep_naive   = results_multi["config"]["reputation_by_alpha"][1.0]
+    elif results is not None and 0.0 in results and 1.0 in results:
+        rep_aligned = results[0.0]["final_eval"]["mean_final_reputation"]
+        rep_naive   = results[1.0]["final_eval"]["mean_final_reputation"]
     else:
         rep_aligned, rep_naive = 0.985, 1.000
 
-    # ── Run simulation ─────────────────────────────────────────────────────────────── #
-    pop = run_pop_sim(rep_aligned, rep_naive, audit_prob, audit_penalty, selection_intensity)
+    # ── Run live simulation ────────────────────────────────────────────────────── #
+    pop = run_pop_sim(
+        rep_aligned, rep_naive,
+        audit_prob, audit_penalty, false_positive_rate, selection_intensity,
+    )
 
     final_gaming_frac = pop["gaming_fraction"][-1]
     final_mean_alpha  = pop["mean_alpha"][-1]
@@ -415,46 +480,85 @@ with tab3:
     else:
         phase, icon = "Gaming equilibrium",  "🔴"
 
-    # ── Outcome indicators ─────────────────────────────────────────────────────────── #
     oc1, oc2, oc3, oc4 = st.columns([1.6, 1, 1, 1])
-    oc1.metric("Equilibrium",               f"{icon} {phase}")
-    oc2.metric("Gaming fraction",           f"{final_gaming_frac:.1%}")
-    oc3.metric("Mean gaming tendency (α)",  f"{final_mean_alpha:.3f}")
-    oc4.metric("Market health",             f"{final_market:.3f}")
+    oc1.metric("Equilibrium",              f"{icon} {phase}")
+    oc2.metric("Gaming fraction",          f"{final_gaming_frac:.1%}")
+    oc3.metric("Mean gaming tendency (α)", f"{final_mean_alpha:.3f}")
+    oc4.metric("Market health",            f"{final_market:.3f}")
 
-    # ── Trajectory charts + governance heatmap ──────────────────────────────────────── #
-    left_col, right_col = st.columns([1, 1])
-
-    gen_idx = list(range(len(pop["mean_alpha"])))
+    # ── Main charts ───────────────────────────────────────────────────────────── #
+    left_col, right_col = st.columns([1.1, 1])
 
     with left_col:
+        st.markdown("**Governance efficiency frontier**")
+        st.caption(
+            f"Equilibrium market health vs audit intensity at three audit precision levels "
+            f"(severity = {audit_penalty:.2f}, selection intensity = {selection_intensity:.1f}). "
+            f"Your current audit probability is marked ✕."
+        )
+        with st.spinner("Computing efficiency frontier…"):
+            eff = run_efficiency_frontier(
+                rep_aligned, rep_naive, selection_intensity, audit_penalty
+            )
+
+        fpr_vals   = sorted(eff["curves"].keys())
+        fpr_labels = {
+            0.00: "FPR = 0.00 (perfect precision)",
+            0.15: "FPR = 0.15",
+            0.30: "FPR = 0.30",
+        }
+
+        fig_eff = go.Figure()
+        for fpr, color in zip(fpr_vals, FPR_COLORS):
+            curve = eff["curves"][fpr]
+            fig_eff.add_trace(go.Scatter(
+                x=eff["audit_probs"],
+                y=curve["market_health"],
+                name=fpr_labels.get(fpr, f"FPR = {fpr:.2f}"),
+                line=dict(color=color, width=2.5),
+            ))
+        fig_eff.add_trace(go.Scatter(
+            x=[audit_prob],
+            y=[final_market],
+            mode="markers+text",
+            marker=dict(symbol="x", size=14, color="white",
+                        line=dict(width=2.5, color="black")),
+            text=["You"],
+            textposition="top center",
+            textfont=dict(color="white", size=11),
+            showlegend=False,
+            hoverinfo="skip",
+        ))
+        fig_eff.update_layout(
+            xaxis=dict(title="Audit probability", tickformat=".2f"),
+            yaxis=dict(title="Market health at equilibrium", range=[0, 1.05]),
+            legend=dict(orientation="h", y=1.10),
+            height=420,
+            margin=dict(l=50, r=20, t=60, b=50),
+        )
+        st.plotly_chart(fig_eff, width="stretch")
+
+    with right_col:
+        st.markdown("**Population dynamics — current settings**")
+        gen_idx = list(range(len(pop["mean_alpha"])))
+
         fig_traj = make_subplots(
             rows=2, cols=1,
             shared_xaxes=True,
-            subplot_titles=("Gaming tendency over generations", "Market health over generations"),
+            subplot_titles=("Gaming tendency (α)", "Market health"),
             vertical_spacing=0.12,
-        )
-
-        # Gaming tendency
-        fig_traj.add_hrect(
-            y0=0, y1=0.2,
-            fillcolor="rgba(46,204,113,0.08)", line_width=0,
-            annotation_text="Aligned zone", annotation_position="top left",
-            row=1, col=1,
         )
         fig_traj.add_trace(go.Scatter(
             x=gen_idx, y=pop["mean_alpha"],
-            name="Mean gaming tendency (α)",
-            line=dict(color=C_NAIVE, width=2.5),
-            fill="tozeroy", fillcolor="rgba(231,76,60,0.08)",
+            name="Mean α",
+            line=dict(color=C_GAMING, width=2.5),
+            fill="tozeroy", fillcolor="rgba(231,76,60,0.10)",
         ), row=1, col=1)
         fig_traj.add_trace(go.Scatter(
             x=gen_idx, y=pop["gaming_fraction"],
             name="Gaming fraction (α > 0.5)",
-            line=dict(color=C_NAIVE, width=1.5, dash="dash"),
+            line=dict(color=C_GAMING, width=1.5, dash="dash"),
         ), row=1, col=1)
-
-        # Market health
         fig_traj.add_trace(go.Scatter(
             x=gen_idx, y=pop["market_health"],
             name="Market health",
@@ -463,7 +567,7 @@ with tab3:
         ), row=2, col=1)
         fig_traj.add_trace(go.Scatter(
             x=gen_idx, y=pop["effective_rep"],
-            name="Mean effective reputation",
+            name="Effective reputation",
             line=dict(color=C_QUALITY, width=1.5, dash="dot"),
         ), row=2, col=1)
 
@@ -471,86 +575,67 @@ with tab3:
         fig_traj.update_yaxes(range=[0, 1.05], row=2, col=1)
         fig_traj.update_xaxes(title_text="Generation", row=2, col=1)
         fig_traj.update_layout(
-            height=580,
-            legend=dict(orientation="h", y=-0.10),
+            legend=dict(orientation="h", y=-0.12),
+            height=420,
             margin=dict(l=50, r=20, t=50, b=80),
         )
         st.plotly_chart(fig_traj, width="stretch")
 
-    with right_col:
-        st.markdown("**Governance phase diagram**")
+    # ── Phase diagram ─────────────────────────────────────────────────────────── #
+    with st.expander("Governance phase diagram (audit probability × severity)"):
         st.caption(
-            f"Final gaming fraction across the full (audit probability × audit severity) space "
-            f"at selection intensity = **{selection_intensity:.1f}**. "
-            f"Your current slider position is marked ✕. "
-            f"Green = aligned equilibrium · Red = gaming equilibrium."
+            f"Final gaming fraction across the full (audit probability × severity) space "
+            f"at selection intensity = {selection_intensity:.1f}, FPR = {false_positive_rate:.2f}. "
+            f"Current position marked ✕."
         )
-
         with st.spinner("Mapping governance space…"):
             probs, penalties, z = governance_heatmap_data(
-                rep_aligned, rep_naive, selection_intensity
+                rep_aligned, rep_naive, selection_intensity, false_positive_rate
             )
 
         fig_hm = go.Figure()
         fig_hm.add_trace(go.Heatmap(
-            x=probs,
-            y=penalties,
-            z=z,
+            x=probs, y=penalties, z=z,
             colorscale=[
-                [0.00, "#2ecc71"],   # green  — aligned
-                [0.35, "#f0a500"],   # amber  — mixed
-                [1.00, "#e74c3c"],   # red    — gaming
+                [0.00, "#2ecc71"],
+                [0.35, "#f0a500"],
+                [1.00, "#e74c3c"],
             ],
             zmin=0, zmax=1,
-            colorbar=dict(
-                title="Gaming fraction",
-                tickformat=".0%",
-                len=0.75,
-                y=0.5,
-            ),
+            colorbar=dict(title="Gaming fraction", tickformat=".0%", len=0.75, y=0.5),
             hovertemplate=(
                 "Audit prob: %{x:.2f}<br>"
                 "Audit severity: %{y:.2f}<br>"
                 "Gaming fraction: %{z:.1%}<extra></extra>"
             ),
         ))
-        # Current slider position marker
         fig_hm.add_trace(go.Scatter(
-            x=[audit_prob],
-            y=[audit_penalty],
+            x=[audit_prob], y=[audit_penalty],
             mode="markers+text",
-            marker=dict(
-                symbol="x",
-                size=14,
-                color="white",
-                line=dict(width=2.5, color="black"),
-            ),
-            text=["You"],
-            textposition="top center",
+            marker=dict(symbol="x", size=14, color="white",
+                        line=dict(width=2.5, color="black")),
+            text=["You"], textposition="top center",
             textfont=dict(color="white", size=11),
-            showlegend=False,
-            hoverinfo="skip",
+            showlegend=False, hoverinfo="skip",
         ))
         fig_hm.update_layout(
-            xaxis=dict(title="Audit probability",  tickformat=".2f"),
-            yaxis=dict(title="Audit severity",     tickformat=".2f"),
-            height=580,
+            xaxis=dict(title="Audit probability", tickformat=".2f"),
+            yaxis=dict(title="Audit severity",    tickformat=".2f"),
+            height=480,
             margin=dict(l=60, r=20, t=10, b=50),
         )
         st.plotly_chart(fig_hm, width="stretch")
 
-    # ── Alpha distribution ─────────────────────────────────────────────────────────── #
+    # ── Population distribution ────────────────────────────────────────────────── #
     with st.expander("Population distribution at final generation"):
         fig_hist = go.Figure(go.Histogram(
             x=pop["alpha_history"][-1],
             nbinsx=20,
-            marker_color=C_NAIVE,
+            marker_color=C_GAMING,
             opacity=0.75,
         ))
         fig_hist.add_vline(
-            x=0.5,
-            line_dash="dash",
-            line_color=C_NEUTRAL,
+            x=0.5, line_dash="dash", line_color=C_NEUTRAL,
             annotation_text="Gaming threshold (α = 0.5)",
             annotation_position="top right",
         )
@@ -566,16 +651,16 @@ with tab3:
     st.markdown(
         """
         ---
-        **How to explore:** Start with all sliders at their defaults (unregulated market,
-        selection intensity 3.0). The population will drift toward gaming as agents discover
-        that reputation gaming outcompetes genuine value delivery. Then increase **audit
-        probability** and **audit severity** to observe whether governance flips the
-        equilibrium. Watch your position on the phase diagram move from red to green.
+        **How to explore:** Start with all sliders at defaults (no audit, FPR = 0, selection
+        intensity 3.0). The population drifts to gaming. Increase **audit probability** to
+        observe governance counteract this. Then increase **false positive rate** to see how
+        imprecise auditing erodes governance effectiveness — at sufficiently high FPR, even
+        aggressive auditing fails to reach the aligned equilibrium. The efficiency frontier
+        chart (left) shows this across the full range of audit intensities.
 
-        The **market reliance on reputation** slider changes the shape of the phase diagram
-        itself: at high selection intensity, reputation differences matter more, the gaming
-        incentive is stronger, and stronger governance is required to reach the aligned
-        equilibrium. This illustrates a key policy implication — the required strength of
-        oversight scales with the power of the reputation signal.
+        **Key policy implication:** Infrastructure operators should prioritise audit
+        *precision* over audit *intensity*. A lower-frequency, high-precision audit achieves
+        better equilibrium outcomes than a high-frequency, imprecise one that penalises
+        legitimate agents.
         """
     )

@@ -1,19 +1,18 @@
 """
 Training loop
 -------------
-Trains two DQN agents against the same environment sequence:
+Trains DQN agents across a sweep of infrastructure signal-fidelity values
+(reward_alpha), producing results.pkl consumed by app.py.
 
-  Naive agent   (reward_alpha=1.0)  optimises for reputation score changes
-  Aligned agent (reward_alpha=0.0)  optimises for value delivered and market health
+    reward_alpha = 1.0  →  infrastructure scores on proxy metrics only
+    reward_alpha = 0.0  →  infrastructure directly credits genuine value
+    intermediate values → mixed quality and proxy signals
 
-Using the same random seed for both agents means their episodes present identical
-task sequences. Any behavioural difference in the results is therefore attributable
-purely to the reward function — not to lucky or unlucky task draws. This controls
-for environmental variance and strengthens the comparison as a demonstration.
+Using the same random seed across all alpha values means agents face identical
+task sequences. Any behavioural difference is attributable purely to what the
+infrastructure rewards, not to lucky or unlucky task draws.
 
-Outputs a results.pkl file consumed by app.py. Can also be run directly:
-
-    python train.py                        # 500 episodes, default settings
+    python train.py                        # 5-point sweep, 500 episodes each
     python train.py --episodes 200 --seed 7
 """
 
@@ -236,7 +235,92 @@ def train_agent(
     }
 
 
-# ─── Comparison run ─────────────────────────────────────────────────────────── #
+# ─── Infrastructure sweep ───────────────────────────────────────────────────── #
+
+# Policy-legible labels for each infrastructure design point
+ALPHA_LABELS = {
+    1.00: ("No governance",          "Scores based on unverified proxy metrics — client ratings, completion rates. No independent quality verification."),
+    0.75: ("Transparency only",      "Platforms disclose scoring methodology. Basic quality checks exist but proxy metrics dominate rankings."),
+    0.50: ("Basic quality audit",    "Independent quality verification carries meaningful weight alongside proxy metrics."),
+    0.25: ("Strong signal diversity","Quality and value delivery are primary ranking signals; proxy metrics play a minor role."),
+    0.00: ("Full quality verification","Infrastructure directly measures genuine value delivery. Scores track actual quality."),
+}
+
+
+def run_infrastructure_sweep(
+    alphas: list = None,
+    n_train_episodes: int = 500,
+    n_eval_episodes: int = 50,
+    eval_interval: int = 50,
+    episode_length: int = 50,
+    seed: int = 42,
+    out_path: str = "results.pkl",
+    progress_callback: Callable[[float, str], None] = None,
+) -> dict:
+    """
+    Train one DQN agent per infrastructure design point and save results.
+
+    Args:
+        alphas:    List of reward_alpha values to train. Defaults to a
+                   five-point sweep [0.0, 0.25, 0.5, 0.75, 1.0].
+        out_path:  File path for the pickled results dict. Pass None to
+                   skip writing to disk.
+
+    Returns:
+        {
+          alpha (float): <train_agent output>,   # one entry per alpha
+          "config": {
+              "alphas":        [float],
+              "alpha_labels":  {float: (short_label, description)},
+              "n_train_episodes", "n_eval_episodes", "episode_length",
+              "action_names", "action_colors",
+          }
+        }
+    """
+    if alphas is None:
+        alphas = [0.0, 0.25, 0.5, 0.75, 1.0]
+
+    results = {}
+    n = len(alphas)
+
+    for i, alpha in enumerate(alphas):
+        short_label, _ = ALPHA_LABELS.get(round(alpha, 2), (f"α={alpha:.2f}", ""))
+        print(f"Training agent — {short_label} (α={alpha:.2f})...")
+
+        def _cb(fraction, label, _i=i):
+            if progress_callback:
+                progress_callback((_i + fraction) / n, label)
+
+        results[alpha] = train_agent(
+            reward_alpha=alpha,
+            n_episodes=n_train_episodes,
+            n_eval_episodes=n_eval_episodes,
+            eval_interval=eval_interval,
+            episode_length=episode_length,
+            seed=seed,
+            progress_callback=_cb,
+        )
+
+    results["config"] = {
+        "alphas":           alphas,
+        "alpha_labels":     ALPHA_LABELS,
+        "n_train_episodes": n_train_episodes,
+        "n_eval_episodes":  n_eval_episodes,
+        "episode_length":   episode_length,
+        "action_names":     AgentMarketplaceEnv.ACTION_NAMES,
+        "action_colors":    AgentMarketplaceEnv.ACTION_COLORS,
+    }
+
+    if out_path:
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "wb") as f:
+            pickle.dump(results, f)
+        print(f"\nResults saved → {out_path}")
+
+    return results
+
+
+# ─── Comparison run (kept for backwards compatibility) ───────────────────────── #
 
 def run_comparison(
     n_train_episodes: int = 500,
@@ -332,50 +416,49 @@ def smooth(values: list, window: int = 20) -> list:
 # ─── CLI entry point ─────────────────────────────────────────────────────────── #
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train naive and aligned DQN agents")
-    parser.add_argument("--episodes", type=int, default=500,         help="Training episodes per agent (default: 500)")
-    parser.add_argument("--seed",     type=int, default=42,          help="Random seed (default: 42)")
-    parser.add_argument("--out",      type=str, default="results.pkl", help="Output path (default: results.pkl)")
+    parser = argparse.ArgumentParser(
+        description="Train DQN agents across infrastructure signal-fidelity sweep"
+    )
+    parser.add_argument("--episodes", type=int, default=500,
+                        help="Training episodes per agent (default: 500)")
+    parser.add_argument("--seed",     type=int, default=42,
+                        help="Random seed (default: 42)")
+    parser.add_argument("--out",      type=str, default="results.pkl",
+                        help="Output path (default: results.pkl)")
     args = parser.parse_args()
 
-    def _cli_bar(fraction, label):
-        filled = int(40 * fraction)
-        bar    = "█" * filled + "░" * (40 - filled)
-        print(f"\r[{bar}] {fraction*100:5.1f}%  {label:<55}", end="", flush=True)
-
-    results = run_comparison(
+    results = run_infrastructure_sweep(
         n_train_episodes=args.episodes,
         seed=args.seed,
         out_path=args.out,
-        progress_callback=_cli_bar,
     )
-    print()
 
     # Summary table
-    naive   = results["naive"]["final_eval"]
-    aligned = results["aligned"]["final_eval"]
-    w = 26
-    print(f"\n{'── Final evaluation':─<60}")
-    print(f"{'Metric':<{w}} {'Naive (α=1.0)':>13} {'Aligned (α=0.0)':>15}")
-    print("─" * 56)
-    rows = [
-        ("Reputation score",  "mean_final_reputation"),
-        ("True quality",      "mean_final_true_quality"),
-        ("Market health",     "mean_final_market_health"),
-        ("Value delivered",   "mean_value_delivered"),
-    ]
-    for label, key in rows:
-        n_val = naive[key]
-        a_val = aligned[key]
-        winner = " ◀" if a_val > n_val else ("" if abs(a_val - n_val) < 0.01 else "")
-        print(f"{label:<{w}} {n_val:>13.3f} {a_val:>15.3f}{winner}")
-
-    print()
-    naive_dist   = results["naive"]["final_eval"]["action_dist"]
-    aligned_dist = results["aligned"]["final_eval"]["action_dist"]
+    alphas       = results["config"]["alphas"]
     action_names = results["config"]["action_names"]
-    print(f"{'── Action distribution':─<60}")
-    print(f"{'Action':<{w}} {'Naive':>13} {'Aligned':>15}")
-    print("─" * 56)
-    for name, n_frac, a_frac in zip(action_names, naive_dist, aligned_dist):
-        print(f"{name:<{w}} {n_frac:>12.1%} {a_frac:>14.1%}")
+    w = 26
+    col_w = 12
+
+    print(f"\n{'── Final evaluation by infrastructure level':─<80}")
+    header = f"{'Metric':<{w}}" + "".join(f"  α={a:.2f}".rjust(col_w) for a in alphas)
+    print(header)
+    print("─" * 80)
+    for label, key in [
+        ("Reputation score",   "mean_final_reputation"),
+        ("True quality",       "mean_final_true_quality"),
+        ("Market health",      "mean_final_market_health"),
+        ("Value delivered",    "mean_value_delivered"),
+    ]:
+        row = f"{label:<{w}}"
+        for a in alphas:
+            row += f"{results[a]['final_eval'][key]:>{col_w}.3f}"
+        print(row)
+
+    print(f"\n{'── Action distribution by infrastructure level':─<80}")
+    print(header.replace("Metric", "Action"))
+    print("─" * 80)
+    for j, name in enumerate(action_names):
+        row = f"{name:<{w}}"
+        for a in alphas:
+            row += f"{results[a]['final_eval']['action_dist'][j]:>{col_w-1}.1%} "
+        print(row)

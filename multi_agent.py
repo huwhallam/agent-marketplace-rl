@@ -4,29 +4,35 @@ Multi-Agent Market Dynamics
 Extends the single-agent simulation in two directions:
 
   1. Competitive environment (CompetitiveMarketEnv)
-     The trained agent now shares the market with a single competitor that
-     always games the metric — i.e., the simplest possible adversarial
-     pressure. Market share is proportional to relative reputation, so as
-     the competitor's reputation climbs through gaming, the aligned agent's
-     income from delivering real value falls. The question is: does
-     competition pressure the aligned agent into adopting gaming strategies?
+     An agent trained under aligned infrastructure (alpha=0) competes
+     against a single opponent that always score-manipulates. Market share
+     is proportional to relative reputation, so the competitor's climbing
+     score progressively undercuts the aligned agent's income. The question
+     is: does competitive selection pressure — not infrastructure design —
+     push the aligned agent toward gaming strategies?
 
-  2. Population dynamics (simulate_market_evolution)
-     Replicator dynamics over a population parameterised by reward_alpha
-     (0 = fully aligned, 1 = fully naive/gaming). Each agent's "fitness"
-     is determined by its effective reputation in a market whose health
-     degrades as more agents game it — a negative externality modelled as
-     a shared commons. Governance (periodic audits) imposes a penalty on
-     gaming reputation, altering the evolutionary equilibrium.
+  2. Population dynamics (simulate_market_evolution / governance_efficiency_data)
+     Replicator dynamics over a population parameterised by alpha ∈ [0, 1]:
+         alpha = 1  →  pure gaming strategy
+         alpha = 0  →  pure aligned strategy
 
-     The combination of market degradation and auditing can flip the
-     equilibrium from "all-gaming" to "all-aligned" — illustrating how
-     the incentive structure, not the agents' architecture, determines the
-     collective outcome.
+     Each agent's fitness is its effective reputation in a market whose
+     health degrades as more agents game it (a shared commons).
+
+     Governance imposes an audit discount on gaming reputations — but
+     audits carry a false positive rate: with probability fpr, an aligned
+     agent is incorrectly penalised. This models the governance trade-off:
+     higher audit intensity catches more gaming but imposes greater cost
+     on legitimate agents. governance_efficiency_data() traces market
+     health and gaming fraction across the full range of audit intensities
+     for multiple false_positive_rate values, producing the efficiency
+     frontier visualised in app.py Tab 3.
 
 Together these connect directly to Pillar 2 of "The Epistemic Gate"
 (Hallam, 2026): when reputation infrastructure is gameable, the market
 selects for gaming unless structural interventions change the payoff.
+The governance efficiency frontier shows that audit *precision* —
+not intensity — determines whether governance actually improves outcomes.
 
 Outputs results_multi.pkl consumed by app.py. Can also be run directly:
 
@@ -106,9 +112,9 @@ class CompetitiveMarketEnv(AgentMarketplaceEnv):
     def step(self, action: int):
         obs, base_reward, terminated, truncated, info = super().step(action)
 
-        # Competitor always games — reputation rises by GAME_REP_DELTA each step
+        # Competitor always score-manipulates — reputation rises by MANIP_REP_DELTA each step
         self.competitor_rep = float(
-            np.clip(self.competitor_rep + self.GAME_REP_DELTA, 0.0, 1.0)
+            np.clip(self.competitor_rep + self.MANIP_REP_DELTA, 0.0, 1.0)
         )
 
         # Market-share-scaled reward
@@ -304,6 +310,7 @@ def simulate_market_evolution(
     selection_intensity: float = 3.0,
     audit_prob: float = 0.0,
     audit_penalty: float = 0.3,
+    false_positive_rate: float = 0.0,
     mutation_std: float = 0.02,
     seed: int = 0,
 ) -> dict:
@@ -311,64 +318,47 @@ def simulate_market_evolution(
     Replicator-dynamics simulation over a mixed population of agents.
 
     Each agent is characterised by a single parameter alpha ∈ [0, 1]:
-        alpha = 1  →  pure gaming strategy (naive reward)
-        alpha = 0  →  pure aligned strategy (value + market health)
+        alpha = 1  →  pure gaming strategy
+        alpha = 0  →  pure aligned strategy
 
-    Each generation the population dynamics follow these steps:
+    Each generation:
 
-    1. Market health
-       A shared resource that degrades as more agents game.
-
+    1. Market health — shared commons degraded by gaming:
            market_health = max(0,  1 − mean_alpha × 0.85)
 
-       This is a commons: individual gaming provides private benefit
-       (higher reputation) at collective cost (lower market health).
+    2. Base reputation — linearly interpolated from DQN benchmarks.
 
-    2. Base reputation
-       Interpolated from the DQN results passed in reputation_by_alpha.
-       For intermediate alpha the reputation is linearly interpolated
-       between the aligned (alpha=0) and naive (alpha=1) benchmarks.
+    3. Governance — audit discount on reputation.
+       Audits catch gaming agents (proportional to alpha) but also
+       incorrectly penalise aligned agents at rate false_positive_rate:
 
-    3. Governance — audits
-       With probability audit_prob per generation an audit is run.
-       Gaming agents are caught with probability proportional to alpha:
+           gaming_penalty  = audit_penalty × audit_prob × alpha
+           fpr_penalty     = audit_penalty × audit_prob × false_positive_rate × (1 − alpha)
+           audit_discount  = gaming_penalty + fpr_penalty
 
-           audit_discount = audit_penalty × audit_prob × alpha
+       false_positive_rate = 0  →  perfect-precision audits, no collateral cost
+       false_positive_rate > 0  →  aligned agents bear some audit cost too,
+                                   reducing governance efficiency
 
-       This reduces effective reputation for gaming agents, modelling
-       regulatory action that degrades the value of reputation gaming.
-
-    4. Market sensitivity
-       Gaming reputation degrades faster as market_health falls —
-       clients lose trust in high scores when they observe market
-       deterioration:
-
+    4. Market sensitivity — gaming rep erodes faster when market_health is low:
            market_factor = 0.5 + 0.5 × market_health
            effective_rep = (base_rep − audit_discount) × market_factor
                            + (1 − market_factor) × aligned_base_rep
 
-       At market_health=1 the factor=1 (full reputation retained).
-       At market_health=0 the factor=0.5 (gaming rep halved).
-       This creates a potential tipping-point: if enough agents game,
-       market_health falls far enough that gaming stops being profitable.
-
-    5. Selection
-       Fitness is effective_rep raised to selection_intensity.
-       Agents replicate proportional to their fitness (tournament selection
-       approximated by softmax-weighted resampling). Gaussian mutation
-       keeps alpha from collapsing to a corner solution.
+    5. Selection — fitness ∝ effective_rep ^ selection_intensity;
+       Gaussian mutation keeps alpha from collapsing to a corner.
 
     Args:
         reputation_by_alpha:  {alpha: mean_final_reputation} for at least
-                              alpha=0.0 and alpha=1.0. Typically loaded from
-                              the results dict produced by run_comparison().
+                              alpha=0.0 and alpha=1.0.
         n_agents:             Population size.
         n_generations:        Number of evolutionary steps.
         selection_intensity:  Exponent on fitness; higher = stronger selection.
         audit_prob:           Per-generation probability of an audit event.
         audit_penalty:        Reputation discount per unit of alpha when audited.
-        mutation_std:         Standard deviation of Gaussian noise applied to
-                              alpha after each replication step.
+        false_positive_rate:  Probability an aligned agent is incorrectly penalised.
+                              Models audit precision: 0.0 = perfect, 1.0 = random.
+        mutation_std:         Standard deviation of Gaussian noise after replication.
         seed:                 NumPy random seed.
 
     Returns:
@@ -405,8 +395,10 @@ def simulate_market_evolution(
         # 2. Base reputation via linear interpolation
         base_rep = rep_aligned + alphas * (rep_naive - rep_aligned)
 
-        # 3. Governance audit discount
-        audit_discount = audit_penalty * audit_prob * alphas
+        # 3. Governance audit discount (gaming agents caught + FPR cost on aligned)
+        gaming_penalty = audit_penalty * audit_prob * alphas
+        fpr_penalty    = audit_penalty * audit_prob * false_positive_rate * (1.0 - alphas)
+        audit_discount = gaming_penalty + fpr_penalty
 
         # 4. Market sensitivity — gaming rep erodes when market health is low
         market_factor = 0.5 + 0.5 * market_health
@@ -442,6 +434,75 @@ def simulate_market_evolution(
         "market_health":   market_hist,
         "effective_rep":   eff_rep_hist,
         "gaming_fraction": gaming_frac_hist,
+    }
+
+
+# ─── Governance efficiency frontier ─────────────────────────────────────────── #
+
+def governance_efficiency_data(
+    reputation_by_alpha: dict,
+    selection_intensity: float = 3.0,
+    audit_penalty: float = 0.3,
+    false_positive_rates: list = None,
+    n_prob_pts: int = 20,
+    seed: int = 0,
+) -> dict:
+    """
+    Compute equilibrium market_health and gaming_fraction across the full
+    range of audit_prob values, for multiple false_positive_rate levels.
+
+    Traces the governance efficiency frontier: how much market improvement
+    (health, reduced gaming) does each unit of audit intensity actually buy,
+    and how does audit precision (false_positive_rate) affect this?
+
+    Args:
+        reputation_by_alpha:  {alpha: mean_final_reputation} benchmark dict.
+        selection_intensity:  Passed through to simulate_market_evolution.
+        audit_penalty:        Reputation discount when audited.
+        false_positive_rates: List of FPR values to trace. Defaults to
+                              [0.0, 0.15, 0.30].
+        n_prob_pts:           Number of audit_prob points from 0 to 0.6.
+        seed:                 NumPy random seed.
+
+    Returns:
+        {
+          "audit_probs": [float × n_prob_pts],
+          "curves": {
+              fpr (float): {
+                  "market_health":   [float × n_prob_pts],
+                  "gaming_fraction": [float × n_prob_pts],
+              }, ...
+          }
+        }
+    """
+    if false_positive_rates is None:
+        false_positive_rates = [0.0, 0.15, 0.30]
+
+    audit_probs = np.linspace(0.0, 0.60, n_prob_pts).tolist()
+
+    curves = {}
+    for fpr in false_positive_rates:
+        mh_curve  = []
+        gf_curve  = []
+        for ap in audit_probs:
+            result = simulate_market_evolution(
+                reputation_by_alpha=reputation_by_alpha,
+                selection_intensity=selection_intensity,
+                audit_prob=ap,
+                audit_penalty=audit_penalty,
+                false_positive_rate=fpr,
+                seed=seed,
+            )
+            mh_curve.append(result["market_health"][-1])
+            gf_curve.append(result["gaming_fraction"][-1])
+        curves[fpr] = {
+            "market_health":   mh_curve,
+            "gaming_fraction": gf_curve,
+        }
+
+    return {
+        "audit_probs": audit_probs,
+        "curves":      curves,
     }
 
 
@@ -483,11 +544,13 @@ def run_multi_agent_study(
               "light_gov":    <simulate_market_evolution output>,
               "strong_gov":   <simulate_market_evolution output>,
           },
+          "efficiency":  <governance_efficiency_data output>,
           "config": {
-              "intensities":       [0.0, 0.5, 1.0],
-              "governance_labels": ["Unregulated", "Light governance", "Strong governance"],
-              "action_names":      AgentMarketplaceEnv.ACTION_NAMES,
-              "action_colors":     AgentMarketplaceEnv.ACTION_COLORS,
+              "intensities":         [0.0, 0.5, 1.0],
+              "governance_labels":   ["Unregulated", "Light governance", "Strong governance"],
+              "action_names":        AgentMarketplaceEnv.ACTION_NAMES,
+              "action_colors":       AgentMarketplaceEnv.ACTION_COLORS,
+              "reputation_by_alpha": {0.0: float, 1.0: float},
           }
         }
     """
@@ -518,15 +581,12 @@ def run_multi_agent_study(
     # Extract reputation benchmarks from the no-competition run (intensity=0)
     fe = competitive_results[0.0]["final_eval"]
     reputation_by_alpha = {
-        0.0: fe["mean_final_reputation"],   # aligned, no competition
-        1.0: AgentMarketplaceEnv.GAME_REP_DELTA * episode_length * 0.5 + 0.5,
-        # Approximate naive/gaming reputation: starts at 0.5, gains GAME_REP_DELTA
-        # each step. Capped at 1.0. We use a rough estimate since the population
-        # model needs both endpoints; the exact value comes from train.py results
-        # if available.
+        0.0: fe["mean_final_reputation"],
+        # Approximate gaming reputation: starts at 0.5, gains MANIP_REP_DELTA each step
+        1.0: min(1.0, AgentMarketplaceEnv.MANIP_REP_DELTA * episode_length * 0.5 + 0.5),
     }
 
-    # Governance regimes
+    # Governance regimes — three representative points on the efficiency frontier
     governance_configs = {
         "unregulated": {"audit_prob": 0.00, "label": "Unregulated"},
         "light_gov":   {"audit_prob": 0.15, "label": "Light governance"},
@@ -544,18 +604,29 @@ def run_multi_agent_study(
         )
         if progress_callback:
             progress_callback(
-                0.75 + (j + 1) / n_gov * 0.25,
+                0.75 + (j + 1) / n_gov * 0.20,
                 f"Population dynamics: {cfg['label']}",
             )
 
+    # Governance efficiency frontier — market health vs audit intensity at 3 FPR levels
+    print("Computing governance efficiency frontier...")
+    efficiency_data = governance_efficiency_data(
+        reputation_by_alpha=reputation_by_alpha,
+        seed=seed,
+    )
+    if progress_callback:
+        progress_callback(0.98, "Governance efficiency frontier computed")
+
     results = {
-        "competitive": competitive_results,
-        "population":  population_results,
+        "competitive":  competitive_results,
+        "population":   population_results,
+        "efficiency":   efficiency_data,
         "config": {
             "intensities":       intensities,
             "governance_labels": [c["label"] for c in governance_configs.values()],
             "action_names":      AgentMarketplaceEnv.ACTION_NAMES,
             "action_colors":     AgentMarketplaceEnv.ACTION_COLORS,
+            "reputation_by_alpha": reputation_by_alpha,
         },
     }
 
